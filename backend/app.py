@@ -28,9 +28,9 @@ face_detector = cv2.FaceDetectorYN.create(
     MODEL_PATH, "", (320, 320), score_threshold=0.4, nms_threshold=0.3, top_k=5000
 )
 
-KNOWN_FACE_WIDTH = 0.15  # in meters
-FOCAL_LENGTH = None  # Will be set after calibration
-TARGET_DISTANCE = 4.0  # Target distance in meters
+KNOWN_FACE_WIDTH = 0.15  
+FOCAL_LENGTH = None  
+TARGET_DISTANCE = 4.0  
 
 calibration_active = False
 distance_measurement_active = False
@@ -53,39 +53,33 @@ def create_processed_image(frame, faces, quality=70):
     height, width = output_frame.shape[:2]
     center_x, center_y = width // 2, height // 2
     
-    # Draw reference box at 4m if distance measurement is active and system is calibrated
+    
     if distance_measurement_active and FOCAL_LENGTH:
         expected_face_width = calculate_expected_face_width_at_distance(TARGET_DISTANCE)
         if expected_face_width > 0:
-            # Calculate box dimensions based on average face aspect ratio (approximately 1.5:1 width:height)
+    
             expected_face_height = int(expected_face_width * 1.5)
             
-            # Position the box in the center of the frame
             ref_x = center_x - expected_face_width // 2
             ref_y = center_y - expected_face_height // 2
             
-            # Draw the reference box in red (B=0, G=0, R=255)
             cv2.rectangle(output_frame, 
                          (ref_x, ref_y), 
                          (ref_x + expected_face_width, ref_y + expected_face_height), 
-                         (0, 0, 255), 2)  # Red color
-            
-            # Add label
+                         (0, 0, 255), 2)  
+
             cv2.putText(output_frame, f"4m Reference", (ref_x, ref_y - 10), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
     
-    # Draw detected faces
+ 
     if faces is not None:
         for face in faces:
             x, y, w, h, confidence = map(float, face[:5])
             x, y, w, h = int(x), int(y), int(w), int(h)
-            # Draw rectangle around face
             cv2.rectangle(output_frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-            # Add confidence text
             text = f"{confidence:.2f}"
             cv2.putText(output_frame, text, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-            
-            # Add distance if available
+    
             if distance_measurement_active and FOCAL_LENGTH:
                 distance = calculate_distance(w)
                 if distance > 0:
@@ -93,7 +87,6 @@ def create_processed_image(frame, faces, quality=70):
                     cv2.putText(output_frame, distance_text, (x, y + h + 20), 
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
     
-    # Convert back to base64 for sending to frontend with quality parameter
     encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
     _, buffer = cv2.imencode('.jpg', output_frame, encode_param)
     img_str = base64.b64encode(buffer).decode('utf-8')
@@ -102,14 +95,12 @@ def create_processed_image(frame, faces, quality=70):
 async def process_image(image_data):
     global calibration_active, distance_measurement_active
     try:
-        # Extract the base64 data after the comma
         img_bytes = base64.b64decode(image_data.split(',')[-1])
         img_np = np.frombuffer(img_bytes, np.uint8)
         frame = cv2.imdecode(img_np, cv2.IMREAD_COLOR)
         if frame is None:
             return {"error": "Invalid image"}
 
-        # Resize frame for faster processing if it's large
         height, width = frame.shape[:2]
         if width > 640:
             scale = 640 / width
@@ -120,17 +111,15 @@ async def process_image(image_data):
         results = face_detector.detect(frame)
         faces = results[1] if results is not None and len(results) > 1 else None
 
-        # Calculate reference box size if calibrated
         reference_box = None
         if FOCAL_LENGTH:
             expected_width = calculate_expected_face_width_at_distance(TARGET_DISTANCE)
             if expected_width > 0:
                 reference_box = {
                     "width": expected_width,
-                    "height": int(expected_width * 1.5)  # Using 1.5:1, typical face aspect ratio
+                    "height": int(expected_width * 1.5)  
                 }
 
-        # Even if no face is detected, send a minimal response to keep the stream flowing
         if faces is None or len(faces) == 0:
             return {
                 "success": False, 
@@ -139,11 +128,9 @@ async def process_image(image_data):
                 "processed_image": create_processed_image(frame, None, quality=60)
             }
 
-        # When face is detected
-        face = max(faces, key=lambda x: x[2] * x[3])  # largest face
+        face = max(faces, key=lambda x: x[2] * x[3])  
         x, y, fw, fh, confidence = map(float, face[:5])
 
-        # Create processed image with detection visualization
         processed_image = create_processed_image(frame, faces, quality=60)
 
         if confidence >= 0.4:
@@ -185,8 +172,7 @@ async def websocket_endpoint(websocket: WebSocket):
     global calibration_active, distance_measurement_active
     await websocket.accept()
     
-    # Create a rate limiter to prevent processing too many frames
-    rate_limit = 0.05  # 50ms minimum between processing frames
+    rate_limit = 0.05  
     last_process_time = 0
     
     while True:
@@ -208,16 +194,13 @@ async def websocket_endpoint(websocket: WebSocket):
                     distance_measurement_active = False
                     await websocket.send_json({"message": "Measurement stopped"})
                 elif cmd == "capture" and "image" in data:
-                    # Handle the calibration capture request with an image
                     response = await process_image(data["image"])
                     await websocket.send_json(response)
                 continue
 
             if "image" in data:
-                # Apply rate limiting for regular processing
                 current_time = asyncio.get_event_loop().time()
                 if current_time - last_process_time < rate_limit:
-                    # Skip this frame if we're processing too quickly
                     continue
                 
                 last_process_time = current_time
