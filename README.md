@@ -14,6 +14,7 @@ face-detection-app/
 └── README.md
 ```
 
+
 ## Prerequisites
 
 - Node.js and npm installed
