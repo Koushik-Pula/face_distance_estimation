@@ -12,6 +12,7 @@ function App() {
     const [statusMessage, setStatusMessage] = useState('');
     const [isMeasuring, setIsMeasuring] = useState(false);
     const [fps, setFps] = useState(0);
+    const [referenceBox, setReferenceBox] = useState(null);
 
     const webcamRef = useRef(null);
     const ws = useRef(null);
@@ -66,6 +67,10 @@ function App() {
 
                 if (data.focal_length) {
                     setFocalLength(data.focal_length);
+                }
+
+                if (data.reference_box) {
+                    setReferenceBox(data.reference_box);
                 }
 
                 if (data.message?.toLowerCase().includes("calibration complete")) {
@@ -127,7 +132,7 @@ function App() {
             setIsMeasuring(true);
             // Higher frequency for better performance (100ms = up to 10 FPS)
             detectionInterval.current = setInterval(sendFrame, 100);
-            setStatusMessage("📏 Measuring distance...");
+            setStatusMessage("📏 Measuring distance... Try to fit your face in the red reference box at 4m");
         }
     };
 
@@ -144,6 +149,7 @@ function App() {
         setCurrentDistance('0m');
         setStatusMessage('Measurement stopped');
         setProcessedImage(null);
+        setReferenceBox(null);
     };
 
     // Cleanup on unmount
@@ -168,45 +174,51 @@ function App() {
             </header>
 
             <main className="container mx-auto px-4 py-8">
-                <div className="max-w-3xl mx-auto">
+                <div className="max-w-4xl mx-auto">
                     <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
-                        <div className="relative aspect-video">
+                        {/* Increased container size */}
+                        <div className="relative">
                             {showCamera && (
-                                <div className="grid grid-cols-2 gap-4">
-                                    <div>
-                                        <h3 className="text-gray-700 font-medium mb-2">Camera Input</h3>
-                                        <Webcam
-                                            ref={webcamRef}
-                                            className="rounded-lg w-full"
-                                            mirrored={true}
-                                            screenshotFormat="image/jpeg"
-                                            screenshotQuality={0.4}
-                                            videoConstraints={{ 
-                                                width: 320, 
-                                                height: 240, 
-                                                facingMode: "user" 
-                                            }}
-                                        />
-                                    </div>
-                                    <div>
-                                        <h3 className="text-gray-700 font-medium mb-2">Detection Result</h3>
-                                        {processedImage ? (
-                                            <img 
-                                                src={processedImage} 
-                                                alt="Processed Output" 
-                                                className="rounded-lg w-full"
-                                            />
-                                        ) : (
-                                            <div className="bg-gray-200 rounded-lg w-full h-full flex items-center justify-center">
-                                                <p className="text-gray-500">Waiting for detection...</p>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <div className="col-span-1 md:col-span-2">
+                                        {/* Full-width container for camera display */}
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                            <div className="w-full">
+                                                <h3 className="text-gray-700 font-medium mb-2">Camera Input</h3>
+                                                <Webcam
+                                                    ref={webcamRef}
+                                                    className="rounded-lg w-full"
+                                                    mirrored={true}
+                                                    screenshotFormat="image/jpeg"
+                                                    screenshotQuality={0.4}
+                                                    videoConstraints={{ 
+                                                        width: 640, 
+                                                        height: 480, 
+                                                        facingMode: "user" 
+                                                    }}
+                                                />
                                             </div>
-                                        )}
+                                            <div className="w-full">
+                                                <h3 className="text-gray-700 font-medium mb-2">Detection Result</h3>
+                                                {processedImage ? (
+                                                    <img 
+                                                        src={processedImage} 
+                                                        alt="Processed Output" 
+                                                        className="rounded-lg w-full"
+                                                    />
+                                                ) : (
+                                                    <div className="bg-gray-200 rounded-lg w-full h-full flex items-center justify-center" style={{minHeight: "480px"}}>
+                                                        <p className="text-gray-500">Waiting for detection...</p>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
                                     </div>
                                 </div>
                             )}
 
                             {!showCamera && (
-                                <div className="absolute inset-0 flex items-center justify-center bg-gray-100 rounded-lg">
+                                <div className="flex items-center justify-center bg-gray-100 rounded-lg" style={{height: "300px"}}>
                                     <p className="text-gray-600">Camera will appear after clicking Calibrate</p>
                                 </div>
                             )}
@@ -258,6 +270,12 @@ function App() {
                                 <span className="text-gray-600">FPS:</span>
                                 <span className="font-mono">{fps}</span>
                             </div>
+                            {isMeasuring && referenceBox && (
+                                <div className="flex items-center gap-2">
+                                    <span className="text-gray-600">Reference Box (4m):</span>
+                                    <span className="font-mono">{referenceBox.width}x{referenceBox.height}px</span>
+                                </div>
+                            )}
                         </div>
                     </div>
                 </div>

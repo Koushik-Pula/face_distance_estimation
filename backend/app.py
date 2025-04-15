@@ -30,6 +30,7 @@ face_detector = cv2.FaceDetectorYN.create(
 
 KNOWN_FACE_WIDTH = 0.15  # in meters
 FOCAL_LENGTH = None  # Will be set after calibration
+TARGET_DISTANCE = 4.0  # Target distance in meters
 
 calibration_active = False
 distance_measurement_active = False
@@ -37,7 +38,10 @@ distance_measurement_active = False
 def calculate_distance(face_width):
     return round((KNOWN_FACE_WIDTH * FOCAL_LENGTH) / face_width, 2) if FOCAL_LENGTH and face_width > 0 else -1
 
-def calibrate_focal_length(face_width, known_distance=0.5):
+def calculate_expected_face_width_at_distance(distance):
+    return int((KNOWN_FACE_WIDTH * FOCAL_LENGTH) / distance) if FOCAL_LENGTH else 0
+
+def calibrate_focal_length(face_width, known_distance=0.7):
     global FOCAL_LENGTH
     FOCAL_LENGTH = (face_width * known_distance) / KNOWN_FACE_WIDTH
     logger.info(f"Focal length calibrated: {FOCAL_LENGTH}")
@@ -46,6 +50,31 @@ def calibrate_focal_length(face_width, known_distance=0.5):
 def create_processed_image(frame, faces, quality=70):
     """Draw face detection results on the image and convert back to base64 with specified quality"""
     output_frame = frame.copy()
+    height, width = output_frame.shape[:2]
+    center_x, center_y = width // 2, height // 2
+    
+    # Draw reference box at 4m if distance measurement is active and system is calibrated
+    if distance_measurement_active and FOCAL_LENGTH:
+        expected_face_width = calculate_expected_face_width_at_distance(TARGET_DISTANCE)
+        if expected_face_width > 0:
+            # Calculate box dimensions based on average face aspect ratio (approximately 1.5:1 width:height)
+            expected_face_height = int(expected_face_width * 1.5)
+            
+            # Position the box in the center of the frame
+            ref_x = center_x - expected_face_width // 2
+            ref_y = center_y - expected_face_height // 2
+            
+            # Draw the reference box in red (B=0, G=0, R=255)
+            cv2.rectangle(output_frame, 
+                         (ref_x, ref_y), 
+                         (ref_x + expected_face_width, ref_y + expected_face_height), 
+                         (0, 0, 255), 2)  # Red color
+            
+            # Add label
+            cv2.putText(output_frame, f"4m Reference", (ref_x, ref_y - 10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+    
+    # Draw detected faces
     if faces is not None:
         for face in faces:
             x, y, w, h, confidence = map(float, face[:5])
@@ -91,11 +120,23 @@ async def process_image(image_data):
         results = face_detector.detect(frame)
         faces = results[1] if results is not None and len(results) > 1 else None
 
+        # Calculate reference box size if calibrated
+        reference_box = None
+        if FOCAL_LENGTH:
+            expected_width = calculate_expected_face_width_at_distance(TARGET_DISTANCE)
+            if expected_width > 0:
+                reference_box = {
+                    "width": expected_width,
+                    "height": int(expected_width * 1.5)  # Using 1.5:1, typical face aspect ratio
+                }
+
         # Even if no face is detected, send a minimal response to keep the stream flowing
         if faces is None or len(faces) == 0:
             return {
                 "success": False, 
-                "message": "No face detected"
+                "message": "No face detected",
+                "reference_box": reference_box if distance_measurement_active else None,
+                "processed_image": create_processed_image(frame, None, quality=60)
             }
 
         # When face is detected
@@ -125,6 +166,7 @@ async def process_image(image_data):
                         "confidence": round(confidence, 2), "distance": distance
                     }],
                     "focal_length": FOCAL_LENGTH,
+                    "reference_box": reference_box,
                     "processed_image": processed_image
                 }
             return {
@@ -160,7 +202,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 elif cmd == "start_distance":
                     distance_measurement_active = True
                     calibration_active = False
-                    await websocket.send_json({"message": "Distance measurement started"})
+                    await websocket.send_json({"message": "Distance measurement started. Try to fit your face in the red reference box (4m)"})
                 elif cmd == "stop_all":
                     calibration_active = False
                     distance_measurement_active = False
