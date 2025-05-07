@@ -9,8 +9,8 @@ face-detection-app/
 ├── backend/
 │   └── app.py         # Python backend server
 ├── src/
-│   └── App.jsx 
-|   |__ LandoltC.jsx      # Main React component
+│   └── App.jsx        # Main React component
+|   |__ LandoltC.jsx      
 ├── package.json       # Frontend configuration
 └── README.md
 ```
