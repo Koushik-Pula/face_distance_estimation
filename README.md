@@ -99,7 +99,7 @@ Backend will be running on:
 ## Ready
 
 - Frontend: http://localhost:5173
-- Backend: http://localhost:5000 or http://localhost:8000
+- Backend: http://localhost:5000 
 
 Start both servers in separate terminals and begin using the app.
 
