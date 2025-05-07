@@ -9,7 +9,8 @@ face-detection-app/
 ├── backend/
 │   └── app.py         # Python backend server
 ├── src/
-│   └── App.jsx        # Main React component
+│   └── App.jsx 
+|   |__ LandoltC.jsx      # Main React component
 ├── package.json       # Frontend configuration
 └── README.md
 ```
@@ -87,9 +88,6 @@ In Terminal 2, run:
 ```bash
 python app.py                # For Flask
 
-# or
-
-uvicorn app:app --reload     # For FastAPI
 ```
 
 Backend will be running on:
@@ -97,14 +95,6 @@ Backend will be running on:
 - Flask: http://localhost:5000
 - FastAPI: http://localhost:8000
 
-## Connecting Frontend & Backend
-
-Make sure your frontend (React) communicates with the backend by updating the axios base URL:
-
-```js
-// Example in src/App.jsx or api.js
-axios.defaults.baseURL = 'http://localhost:5000'; // or 8000 for FastAPI
-```
 
 ## Ready
 
