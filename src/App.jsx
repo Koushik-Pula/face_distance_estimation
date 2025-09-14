@@ -1,8 +1,11 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import Webcam from 'react-webcam';
 import LandoltC from './LandoltC';
+import { AuthProvider, useAuth } from './contexts/AuthContext';
+import ProtectedRoute from './components/ProtectedRoute';
+import AuthModal from './components/AuthModal';
 
-function App() {
+function FaceDetectionApp() {
     const [showCamera, setShowCamera] = useState(false);
     const [currentDistance, setCurrentDistance] = useState('0m');
     const [focalLength, setFocalLength] = useState(0.0);
@@ -17,12 +20,14 @@ function App() {
     const [atTargetDistance, setAtTargetDistance] = useState(false);
     const [isDistanceReached, setIsDistanceReached] = useState(false);
     const [lastFaceDetected, setLastFaceDetected] = useState(Date.now());
+    const [showAuthModal, setShowAuthModal] = useState(false);
     
     // New state variables for countdown and Landolt C test
     const [showCountdown, setShowCountdown] = useState(false);
     const [countdownValue, setCountdownValue] = useState(5);
     const [showLandoltTest, setShowLandoltTest] = useState(false);
 
+    const { user, logout, token } = useAuth();
     const webcamRef = useRef(null);
     const ws = useRef(null);
     const detectionInterval = useRef(null);
@@ -31,6 +36,7 @@ function App() {
     const consecutiveTargetFrames = useRef(0);
     const framesSinceLastFace = useRef(0);
     const countdownTimerRef = useRef(null);
+    const authSentRef = useRef(false);
 
     // FPS calculation
     useEffect(() => {
@@ -50,20 +56,14 @@ function App() {
     const sendFrame = useCallback(() => {
         if (!webcamRef.current || !ws.current || ws.current.readyState !== WebSocket.OPEN) return;
 
-        // Always send frames, even if we might not have a face
-        // This ensures we maintain high FPS and smooth UI updates
         const imageSrc = webcamRef.current.getScreenshot();
         if (!imageSrc) return;
 
-        // Send frame regardless of face detection status
         ws.current.send(JSON.stringify({ image: imageSrc }));
         frameCountRef.current++;
         
-        // If we've already reached target distance and it's been over 5 seconds 
-        // with no face detection, stop measuring
         if (isDistanceReached && (Date.now() - lastFaceDetected > 5000)) {
             framesSinceLastFace.current++;
-            // After 10 frames without a face, stop measuring
             if (framesSinceLastFace.current > 10) {
                 setStatusMessage("✅ Distance measurement complete! 4m distance reached and verified.");
                 stopMeasuringDistance();
@@ -72,18 +72,47 @@ function App() {
     }, [isDistanceReached, lastFaceDetected]);
 
     useEffect(() => {
-        ws.current = new WebSocket("ws://localhost:8000/ws");
+        if (!token) {
+            console.log("No token available for WebSocket connection");
+            return;
+        }
+
+        const storedToken = localStorage.getItem('authToken');
+        console.log("WebSocket using token:", storedToken || token);
+        
+        // Connect to WebSocket using the appropriate path
+        ws.current = new WebSocket(`ws://${window.location.host}/ws`);
+        console.log("Attempting WebSocket connection to:", `ws://${window.location.host}/ws`);
 
         ws.current.onopen = () => {
+            console.log("WebSocket connection established");
             setConnectionStatus('connected');
+            
+            // Send authentication token immediately when connection opens
+            const storedToken = localStorage.getItem('authToken');
+            const tokenToSend = storedToken || token;
+            console.log("Sending authentication token to WebSocket:", tokenToSend);
+            ws.current.send(JSON.stringify({ token: tokenToSend }));
+            authSentRef.current = true;
         };
 
-        ws.current.onclose = () => {
+        ws.current.onclose = (event) => {
+            console.log("WebSocket closed with code:", event.code);
             setConnectionStatus('disconnected');
+            authSentRef.current = false;
         };
 
         ws.current.onmessage = (event) => {
             const data = JSON.parse(event.data);
+
+            if (data.error) {
+                console.error("WebSocket Error:", data.error);
+                setStatusMessage(`Error: ${data.error}`);
+                if (data.error.includes('Authentication')) {
+                    logout();
+                }
+                return;
+            }
 
             if (data.success) {
                 if (data.processed_image) {
@@ -104,7 +133,6 @@ function App() {
                     setStatusMessage("✅ Calibration complete! You can now measure distance.");
                 }
 
-                // Track if face was detected
                 if (data.face_detected) {
                     setLastFaceDetected(Date.now());
                     framesSinceLastFace.current = 0;
@@ -114,17 +142,13 @@ function App() {
                     const distance = data.faces[0].distance;
                     setCurrentDistance(distance > 0 ? `${distance}m` : 'Calculating...');
                     
-                    // Check if we're at target distance of 4m
                     if (data.at_target_distance) {
                         setAtTargetDistance(true);
                         consecutiveTargetFrames.current++;
                         
-                        // If we've been at the target distance for 1.5 seconds (15 frames at 10fps)
                         if (consecutiveTargetFrames.current >= 15 && !isDistanceReached) {
                             setIsDistanceReached(true);
                             setStatusMessage("🎯 Perfect! You've reached the 4m distance! Starting countdown for vision test...");
-                            
-                            // Start the countdown for the Landolt C test
                             startCountdown();
                         }
                     } else {
@@ -134,46 +158,46 @@ function App() {
                 }
             }
 
-            if (data.message) {
+            if (data.message && !data.message.includes('Authenticated successfully')) {
                 setStatusMessage(data.message);
-            }
-
-            if (data.error) {
-                console.error("Error:", data.error);
-                setStatusMessage(`Error: ${data.error}`);
             }
         };
 
         ws.current.onerror = (error) => {
             console.error("WebSocket Error:", error);
             setConnectionStatus('error');
+            setStatusMessage("⚠️ Error connecting to server. Check if backend is running on port 8000.");
+        };
+        
+        ws.current.onclose = (event) => {
+            console.log("WebSocket connection closed:", event.code, event.reason);
+            setConnectionStatus('disconnected');
+            authSentRef.current = false;
         };
 
         return () => {
-            if (ws.current) ws.current.close();
+            if (ws.current) {
+                ws.current.close();
+            }
         };
-    }, [isMeasuring, isDistanceReached]);
+    }, [isMeasuring, isDistanceReached, token, logout]);
 
-    // Function to start the countdown timer
     const startCountdown = () => {
-        // Stop the distance measurement immediately
         stopMeasuringDistance();
         
         setShowCountdown(true);
         setCountdownValue(5);
         
-        // Clear any existing countdown
         if (countdownTimerRef.current) {
             clearInterval(countdownTimerRef.current);
         }
         
-        // Set up countdown timer
         countdownTimerRef.current = setInterval(() => {
             setCountdownValue(prev => {
                 if (prev <= 1) {
                     clearInterval(countdownTimerRef.current);
                     setShowCountdown(false);
-                    setShowLandoltTest(true); // Show Landolt test when countdown completes
+                    setShowLandoltTest(true);
                     return 0;
                 }
                 return prev - 1;
@@ -194,7 +218,6 @@ function App() {
     const captureCalibration = () => {
         const imageSrc = webcamRef.current?.getScreenshot();
         if (imageSrc && ws.current && ws.current.readyState === WebSocket.OPEN) {
-            // Send both command and image for calibration
             ws.current.send(JSON.stringify({ 
                 command: "capture", 
                 image: imageSrc 
@@ -203,7 +226,6 @@ function App() {
     };
 
     const startMeasuringDistance = () => {
-        // Reset states for a new measurement session
         setIsDistanceReached(false);
         setAtTargetDistance(false);
         setShowCountdown(false);
@@ -211,11 +233,8 @@ function App() {
         framesSinceLastFace.current = 0;
         
         if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-            // Send the command to start distance measurement mode
             ws.current.send(JSON.stringify({ command: "start_distance" }));
             setIsMeasuring(true);
-            
-            // Higher frequency for better performance (100ms = up to 10 FPS)
             detectionInterval.current = setInterval(sendFrame, 100);
             setStatusMessage("📏 Measuring distance... Try to fit your face in the red reference box at 4m");
         }
@@ -223,7 +242,6 @@ function App() {
 
     const stopMeasuringDistance = () => {
         if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-            // Send the command to stop all measurements
             ws.current.send(JSON.stringify({ command: "stop_all" }));
         }
         if (detectionInterval.current) {
@@ -233,12 +251,10 @@ function App() {
         setIsMeasuring(false);
     };
     
-    // Close the Landolt C test
     const closeLandoltTest = () => {
         setShowLandoltTest(false);
     };
 
-    // Cleanup on unmount
     useEffect(() => {
         return () => {
             if (detectionInterval.current) {
@@ -254,18 +270,40 @@ function App() {
         <div className="min-h-screen bg-gray-100">
             <header className="bg-white shadow-md">
                 <div className="container mx-auto px-4 py-6">
-                    <h1 className="text-3xl font-bold text-gray-800">Face Detection App</h1>
-                    <p className="mt-2 text-gray-600">Real-time face detection with distance measurement</p>
-                    <p className={`mt-1 text-sm ${connectionStatus === 'connected' ? 'text-green-600' : 'text-red-600'}`}>
-                        {connectionStatus === 'connected' ? 'Connected to server' : 'Not connected to server'}
-                    </p>
+                    <div className="flex justify-between items-center">
+                        <div>
+                            <h1 className="text-3xl font-bold text-gray-800">Face Detection App</h1>
+                            <p className="mt-2 text-gray-600">Real-time face detection with distance measurement</p>
+                            <p className={`mt-1 text-sm ${connectionStatus === 'connected' ? 'text-green-600' : 'text-red-600'}`}>
+                                {connectionStatus === 'connected' ? 'Connected to server' : 'Not connected to server'}
+                            </p>
+                        </div>
+                        <div className="flex items-center space-x-4">
+                            {user && (
+                                <>
+                                    <span className="text-gray-700">Welcome, {user.full_name}!</span>
+                                    <button
+                                        onClick={() => setShowAuthModal(true)}
+                                        className="text-blue-600 hover:text-blue-700"
+                                    >
+                                        Account
+                                    </button>
+                                    <button
+                                        onClick={logout}
+                                        className="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-lg"
+                                    >
+                                        Logout
+                                    </button>
+                                </>
+                            )}
+                        </div>
+                    </div>
                 </div>
             </header>
 
             <main className="container mx-auto px-4 py-8">
                 <div className="max-w-4xl mx-auto">
                     <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
-                        {/* Countdown overlay */}
                         {showCountdown && (
                             <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-75 z-50">
                                 <div className="bg-white rounded-xl p-10 text-center shadow-2xl">
@@ -276,12 +314,10 @@ function App() {
                             </div>
                         )}
                         
-                        {/* Landolt C Test */}
                         {showLandoltTest && (
                             <LandoltC onClose={closeLandoltTest} />
                         )}
                         
-                        {/* Target distance indicator */}
                         {isMeasuring && (
                             <div className={`mb-4 p-3 rounded-lg text-center ${
                                 isDistanceReached ? 'bg-green-500 text-white' : 
@@ -297,12 +333,10 @@ function App() {
                             </div>
                         )}
                         
-                        {/* Increased container size */}
                         <div className="relative">
                             {showCamera && (
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                     <div className="col-span-1 md:col-span-2">
-                                        {/* Full-width container for camera display */}
                                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                             <div className="w-full">
                                                 <h3 className="text-gray-700 font-medium mb-2">Camera Input</h3>
@@ -432,7 +466,22 @@ function App() {
                     <p className="text-center">© 2025 Vision Testing Application</p>
                 </div>
             </footer>
+
+            <AuthModal 
+                isOpen={showAuthModal} 
+                onClose={() => setShowAuthModal(false)} 
+            />
         </div>
+    );
+}
+
+function App() {
+    return (
+        <AuthProvider>
+            <ProtectedRoute>
+                <FaceDetectionApp />
+            </ProtectedRoute>
+        </AuthProvider>
     );
 }
 
