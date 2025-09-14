@@ -3,15 +3,34 @@ import cv2
 import numpy as np
 import os
 import logging
-from fastapi import FastAPI, WebSocket
+import json
+from datetime import timedelta
+from fastapi import FastAPI, WebSocket, HTTPException, status, Depends, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer
 import asyncio
 from collections import deque
+from dotenv import load_dotenv
+
+# Auth imports
+from auth import (
+    authenticate_user, 
+    create_access_token, 
+    get_password_hash, 
+    get_current_active_user,
+    verify_websocket_token,
+    ACCESS_TOKEN_EXPIRE_MINUTES
+)
+from models import UserCreate, UserLogin, Token, User, UserInDB
+from database import users_collection, close_database_connection
+
+# Load environment variables
+load_dotenv()
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-app = FastAPI()
+app = FastAPI(title="Face Detection API with Authentication")
 
 app.add_middleware(
     CORSMiddleware,
@@ -21,6 +40,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+security = HTTPBearer()
+
+# Face detection setup
 MODEL_PATH = "face_detection_yunet_2023mar.onnx"
 if not os.path.exists(MODEL_PATH):
     raise FileNotFoundError(f"Model file '{MODEL_PATH}' not found!")
@@ -32,11 +54,11 @@ face_detector = cv2.FaceDetectorYN.create(
 KNOWN_FACE_WIDTH = 0.15  
 FOCAL_LENGTH = None  
 TARGET_DISTANCE = 4.0  
-DISTANCE_THRESHOLD = 0.2  # Consider within 20cm of target as "at target distance"
+DISTANCE_THRESHOLD = 0.2  
 
 calibration_active = False
 distance_measurement_active = False
-previous_distances = deque(maxlen=5)  # Store recent distance measurements for smoothing
+previous_distances = deque(maxlen=5)
 
 def calculate_distance(face_width):
     return round((KNOWN_FACE_WIDTH * FOCAL_LENGTH) / face_width, 2) if FOCAL_LENGTH and face_width > 0 else -1
@@ -57,9 +79,7 @@ def smooth_distance(new_distance):
         
     previous_distances.append(new_distance)
     
-    # More weight to closer distances for safety
     if len(previous_distances) >= 3:
-        # Sort distances and take the median
         sorted_distances = sorted(previous_distances)
         return sorted_distances[len(sorted_distances) // 2]
     
@@ -75,7 +95,6 @@ def create_processed_image(frame, faces, distance=-1, quality=70):
     height, width = output_frame.shape[:2]
     center_x, center_y = width // 2, height // 2
     
-    # Always draw a reference box for 4m if we have a calibrated focal length
     if distance_measurement_active and FOCAL_LENGTH:
         expected_face_width = calculate_expected_face_width_at_distance(TARGET_DISTANCE)
         if expected_face_width > 0:
@@ -84,7 +103,6 @@ def create_processed_image(frame, faces, distance=-1, quality=70):
             ref_x = center_x - expected_face_width // 2
             ref_y = center_y - expected_face_height // 2
             
-            # Draw reference box - red normally, green when at target distance
             box_color = (0, 255, 0) if is_at_target_distance(distance) else (0, 0, 255)
             box_thickness = 3 if is_at_target_distance(distance) else 2
             
@@ -93,7 +111,6 @@ def create_processed_image(frame, faces, distance=-1, quality=70):
                          (ref_x + expected_face_width, ref_y + expected_face_height), 
                          box_color, box_thickness)  
 
-            # Add different text depending on if target is reached
             if is_at_target_distance(distance):
                 cv2.putText(output_frame, f"PERFECT! 4m REACHED", (ref_x, ref_y - 10), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, box_color, 2)
@@ -101,7 +118,6 @@ def create_processed_image(frame, faces, distance=-1, quality=70):
                 cv2.putText(output_frame, f"4m Reference", (ref_x, ref_y - 10), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 1)
     
-    # Draw detected faces
     if faces is not None:
         for face in faces:
             x, y, w, h, confidence = map(float, face[:5])
@@ -113,7 +129,6 @@ def create_processed_image(frame, faces, distance=-1, quality=70):
             if distance_measurement_active and FOCAL_LENGTH:
                 distance = calculate_distance(w)
                 if distance > 0:
-                    # Use blue normally, green when at target distance
                     color = (0, 255, 0) if is_at_target_distance(distance) else (255, 0, 0)
                     thickness = 2 if is_at_target_distance(distance) else 1
                     
@@ -157,7 +172,6 @@ async def process_image(image_data):
                     "height": int(expected_width * 1.5)  
                 }
 
-        # No face detected case - still return processed image with reference box
         if faces is None or len(faces) == 0:
             return {
                 "success": False, 
@@ -185,8 +199,6 @@ async def process_image(image_data):
             if distance_measurement_active and FOCAL_LENGTH:
                 raw_distance = calculate_distance(fw)
                 smoothed_distance = smooth_distance(raw_distance)
-                
-                # Check if at target distance
                 at_target = is_at_target_distance(smoothed_distance)
                 
                 return {
@@ -220,10 +232,85 @@ async def process_image(image_data):
         logger.error(f"Error in processing: {e}")
         return {"error": str(e)}
 
+# Authentication Routes
+@app.post("/auth/register", response_model=Token)
+async def register(user: UserCreate):
+    # Check if user already exists
+    existing_user = await users_collection.find_one({"email": user.email})
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered"
+        )
+    
+    # Create new user
+    hashed_password = get_password_hash(user.password)
+    user_dict = user.dict()
+    del user_dict['password']
+    user_dict['hashed_password'] = hashed_password
+    user_dict['is_active'] = True
+    
+    user_in_db = UserInDB(**user_dict)
+    result = await users_collection.insert_one(user_in_db.dict(by_alias=True, exclude={"id"}))
+    
+    # Create access token
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.email}, expires_delta=access_token_expires
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
+@app.post("/auth/login", response_model=Token)
+async def login(user_credentials: UserLogin):
+    user = await authenticate_user(user_credentials.email, user_credentials.password)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.email}, expires_delta=access_token_expires
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
+@app.get("/auth/me", response_model=User)
+async def read_users_me(current_user: User = Depends(get_current_active_user)):
+    return current_user
+
+@app.get("/auth/protected")
+async def protected_route(current_user: User = Depends(get_current_active_user)):
+    return {"message": f"Hello {current_user.full_name}, this is a protected route!"}
+
+# Protected WebSocket endpoint
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     global calibration_active, distance_measurement_active
+    
+    # Wait for authentication token
     await websocket.accept()
+    
+    try:
+        # First message should contain the authentication token
+        auth_data = await websocket.receive_json()
+        if "token" not in auth_data:
+            await websocket.send_json({"error": "Authentication token required"})
+            await websocket.close(code=1008)
+            return
+            
+        user = await verify_websocket_token(auth_data["token"])
+        if not user:
+            await websocket.send_json({"error": "Invalid authentication token"})
+            await websocket.close(code=1008)
+            return
+            
+        await websocket.send_json({"message": f"Authenticated successfully as {user.full_name}"})
+        
+    except Exception as e:
+        logger.error(f"Authentication error: {e}")
+        await websocket.close(code=1008)
+        return
     
     rate_limit = 0.05  
     last_process_time = 0
@@ -260,10 +347,27 @@ async def websocket_endpoint(websocket: WebSocket):
                 response = await process_image(data["image"])
                 await websocket.send_json(response)
 
+        except WebSocketDisconnect:
+            logger.info("WebSocket disconnected")
+            break
         except Exception as e:
             logger.error(f"WebSocket error: {e}")
             break
 
+# Health check endpoint (public)
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy"}
+
+# Startup event
+@app.on_event("startup")
+async def startup_event():
+    logger.info("Face Detection API with Authentication started")
+
+# Shutdown event
+@app.on_event("shutdown")
+async def shutdown_event():
+    await close_database_connection()
 
 if __name__ == "__main__":
     import uvicorn
